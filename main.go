@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
+	polkaAPIKey    string
 }
 
 type Chirp struct {
@@ -167,10 +169,11 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusCreated, map[string]interface{}{
-		"id":         user.ID,
-		"email":      user.Email,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
+		"id":            user.ID,
+		"email":         user.Email,
+		"created_at":    user.CreatedAt,
+		"updated_at":    user.UpdatedAt,
+		"is_chirpy_red": user.IsChirpyRed,
 	})
 }
 
@@ -198,7 +201,33 @@ func (cfg *apiConfig) deleteAllUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) getChirps(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := cfg.db.GetChirps(r.Context())
+	authorID := r.URL.Query().Get("author_id")
+	sortBy := r.URL.Query().Get("sort")
+
+	var dbChirps []database.Chirp
+	var err error
+
+	if authorID != "" {
+		authorID, err := uuid.Parse(authorID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid author ID", err)
+			return
+		}
+		dbChirps, err = cfg.db.GetChirpsByAuthorID(r.Context(), authorID)
+	} else {
+		dbChirps, err = cfg.db.GetChirps(r.Context())
+	}
+
+	if sortBy == "desc" {
+		sort.Slice(dbChirps, func(i, j int) bool {
+			return dbChirps[i].CreatedAt.After(dbChirps[j].CreatedAt)
+		})
+	} else {
+		sort.Slice(dbChirps, func(i, j int) bool {
+			return dbChirps[i].CreatedAt.Before(dbChirps[j].CreatedAt)
+		})
+	}
+
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Couldn't retrieve chirps", err)
 		return
@@ -291,6 +320,7 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		"updated_at":    user.UpdatedAt,
 		"token":         token,
 		"refresh_token": refreshToken,
+		"is_chirpy_red": user.IsChirpyRed,
 	})
 }
 
@@ -378,10 +408,11 @@ func (cfg *apiConfig) updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondWithJSON(w, http.StatusOK, map[string]interface{}{
-		"id":         user.ID,
-		"email":      user.Email,
-		"created_at": user.CreatedAt,
-		"updated_at": user.UpdatedAt,
+		"id":            user.ID,
+		"email":         user.Email,
+		"created_at":    user.CreatedAt,
+		"updated_at":    user.UpdatedAt,
+		"is_chirpy_red": user.IsChirpyRed,
 	})
 }
 
@@ -423,6 +454,56 @@ func (cfg *apiConfig) deleteChirp(w http.ResponseWriter, r *http.Request) {
 		"message": "Chirp deleted",
 	})
 }
+
+func (cfg *apiConfig) makeChirpRed(w http.ResponseWriter, r *http.Request) {
+	type RequestBody struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID string `json:"user_id"`
+		} `json:"data"`
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't find api key", err)
+		return
+	}
+	if apiKey != cfg.polkaAPIKey {
+		respondWithError(w, http.StatusUnauthorized, "API key is invalid", err)
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var requestBody RequestBody
+	err = decoder.Decode(&requestBody)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Something went wrong while decoding request body", err)
+		return
+	}
+
+	if requestBody.Event != "user.upgraded" {
+		w.WriteHeader(204)
+		return
+	} else if requestBody.Event == "user.upgraded" {
+		userID, err := uuid.Parse(requestBody.Data.UserID)
+		if err != nil {
+			respondWithError(w, http.StatusBadRequest, "Invalid user ID", err)
+			return
+		}
+
+		_, err = cfg.db.UpdateUserIsChirpyRed(r.Context(), database.UpdateUserIsChirpyRedParams{
+			ID:          userID,
+			IsChirpyRed: true,
+		})
+		if err != nil {
+			respondWithError(w, http.StatusNotFound, "User not found", err)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -438,6 +519,7 @@ func main() {
 	apiCfg := &apiConfig{
 		fileserverHits: atomic.Int32{},
 		db:             dbQueries,
+		polkaAPIKey:    os.Getenv("POLKA_KEY"),
 	}
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir("./")))))
 
@@ -455,6 +537,8 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirps)
 	mux.HandleFunc("GET /api/chirps/{id}", apiCfg.getChirp)
 	mux.HandleFunc("DELETE /api/chirps/{id}", apiCfg.deleteChirp)
+
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.makeChirpRed)
 
 	server := &http.Server{
 		Addr:    ":" + port,

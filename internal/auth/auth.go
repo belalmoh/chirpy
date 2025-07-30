@@ -71,3 +71,15 @@ func MakeRefreshToken() string {
 	rand.Read(token)
 	return hex.EncodeToString(token)
 }
+
+func GetAPIKey(headers http.Header) (string, error) {
+	apiKey := headers.Get("Authorization")
+	if !strings.HasPrefix(apiKey, "ApiKey ") {
+		return "", errors.New("malformed API key" + apiKey)
+	}
+	apiKey = strings.TrimPrefix(apiKey, "ApiKey ")
+	if apiKey == "" {
+		return "", errors.New("no API key was provided")
+	}
+	return apiKey, nil
+}

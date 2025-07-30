@@ -15,3 +15,7 @@ SELECT * FROM users WHERE email = $1;
 -- name: UpdateUserByID :one
 UPDATE users SET email = $2, password_hash = $3, updated_at = NOW() WHERE id = $1
 RETURNING *;
+
+-- name: UpdateUserIsChirpyRed :one
+UPDATE users SET is_chirpy_red = $2, updated_at = NOW() WHERE id = $1
+RETURNING *;
