@@ -1,0 +1,21 @@
+services:
+  chirpy-db:
+    image: postgres:16-alpine
+    container_name: chirpy-db
+    environment:
+      POSTGRES_DB: chirpy
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - chirpy-network
+
+volumes:
+  postgres_data:
+
+networks:
+  chirpy-network:
+    driver: bridge
